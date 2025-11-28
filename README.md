@@ -347,30 +347,14 @@ python tools/visualize_memory.py
 
 Then open your browser to `http://localhost:8050` to view the interactive dashboard.
 
-## 📈 Live Graph Status
+**Features:**
+- **Graph Visualization**: Interactive network graph with node sizes based on priority and colors based on type
+- **Priority Statistics**: Box plots showing priority distribution by note type
+- **Relations Analysis**: Bar chart of relation types distribution
+- **Event Timeline**: Timeline visualization of all system events
+- **Node Details**: Detailed table with priority, edge count, summaries, and tags
 
-Quick status check for your memory system (similar to `git status`):
-
-```bash
-python tools/amem_stats.py --graph
-```
-
-**Output:**
-```
-🧠 A-MEM Graph Status
-==================================================
-📝 Notes:        47
-🔗 Relations:    89
-📊 Notes by Type:
-   🔴 rule           12
-   🔵 procedure      15
-   🟢 concept        20
-⚙️  Last Enzyme Run: 23min ago
-📡 Data Source: http
-==================================================
-```
-
-The tool automatically tries to fetch live data from the running MCP server (if HTTP server is enabled), otherwise reads from disk. Perfect for monitoring your memory system while coding!
+The dashboard automatically refreshes when you click the refresh button, allowing you to explore patterns and insights in your memory system.
 
 **Data Sync:** The visualizer loads graph data from `data/graph/knowledge_graph.json`. To update the data, run:
 ```bash
@@ -384,41 +368,63 @@ This script connects to the running MCP server via HTTP (if `TCP_SERVER_ENABLED=
 Quick status check for your memory system (similar to `git status`):
 
 ```bash
-python tools/amem_stats.py --graph
+# Full status (default)
+python tools/amem_stats.py
+
+# Compact one-line output
+python tools/amem_stats.py --compact
+
+# JSON output (for scripting)
+python tools/amem_stats.py --json
+
+# Show changes since last run
+python tools/amem_stats.py --diff
+
+# Watch mode (auto-refresh every 5 seconds)
+python tools/amem_stats.py --watch
+
+# Watch mode with custom interval (10 seconds)
+python tools/amem_stats.py --watch 10
 ```
 
-**Output:**
+**Output Examples:**
+
+**Full Status:**
 ```
 🧠 A-MEM Graph Status
 ==================================================
 📝 Notes:        47
 🔗 Relations:    89
-
 📊 Notes by Type:
    🔴 rule           12
    🔵 procedure      15
    🟢 concept        20
-
-🔗 Relations by Type:
-   relates_to             65
-   supports               24
-
 ⚙️  Last Enzyme Run: 23min ago
-
 📡 Data Source: http
 ==================================================
 ```
 
+**Compact Mode:**
+```
+47 notes | 89 relations | Last: 23min ago
+```
+
+**Diff Mode:**
+```
++5 notes | +12 relations | -3 zombie nodes
+```
+
+**Watch Mode:**
+Continuously refreshes the display every N seconds. Perfect for monitoring while coding! Press `Ctrl+C` to stop.
+
 The tool automatically tries to fetch live data from the running MCP server (if HTTP server is enabled), otherwise reads from disk. Perfect for monitoring your memory system while coding!
 
-**Features:**
-- **Graph Visualization**: Interactive network graph with node sizes based on priority and colors based on type
-- **Priority Statistics**: Box plots showing priority distribution by note type
-- **Relations Analysis**: Bar chart of relation types distribution
-- **Event Timeline**: Timeline visualization of all system events
-- **Node Details**: Detailed table with priority, edge count, summaries, and tags
-
-The dashboard automatically refreshes when you click the refresh button, allowing you to explore patterns and insights in your memory system.
+**Shell Alias (Optional):**
+Add to your `~/.bashrc`, `~/.zshrc`, or PowerShell profile:
+```bash
+alias amem="python ~/path/to/a-mem-mcp-server/tools/amem_stats.py"
+# Then simply: amem
+```
 
 ## 📊 Status
 

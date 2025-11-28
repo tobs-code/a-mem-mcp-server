@@ -198,6 +198,21 @@ async def get_stats_from_http() -> Optional[Dict[str, Any]]:
     return None
 
 
+def print_compact_status(stats: Dict[str, Any], last_enzyme: Optional[Dict[str, Any]] = None):
+    """Prints compact one-line status."""
+    notes = stats["notes"]
+    relations = stats["relations"]
+    zombie_nodes = stats.get("zombie_nodes", 0)
+    
+    time_ago = "never"
+    if last_enzyme:
+        timestamp = last_enzyme.get("timestamp", "")
+        time_ago = format_time_ago(timestamp)
+    
+    zombie_str = f" | {zombie_nodes} zombies" if zombie_nodes > 0 else ""
+    print(f"{notes} notes | {relations} relations | Last: {time_ago}{zombie_str}")
+
+
 def print_graph_status(stats: Dict[str, Any], last_enzyme: Optional[Dict[str, Any]] = None):
     """Prints graph status in git-status style."""
     notes = stats["notes"]
@@ -256,6 +271,57 @@ def print_graph_status(stats: Dict[str, Any], last_enzyme: Optional[Dict[str, An
     print("=" * 50)
 
 
+def get_previous_stats() -> Optional[Dict[str, Any]]:
+    """Loads previous stats from cache file for diff mode."""
+    cache_file = settings.DATA_DIR / ".amem_stats_cache.json"
+    if not cache_file.exists():
+        return None
+    try:
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save_current_stats(stats: Dict[str, Any], last_enzyme: Optional[Dict[str, Any]]):
+    """Saves current stats to cache file for diff mode."""
+    cache_file = settings.DATA_DIR / ".amem_stats_cache.json"
+    try:
+        cache_data = {
+            "notes": stats["notes"],
+            "relations": stats["relations"],
+            "zombie_nodes": stats.get("zombie_nodes", 0),
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(cache_data, f, indent=2)
+    except Exception:
+        pass
+
+
+def print_diff_status(stats: Dict[str, Any], previous: Optional[Dict[str, Any]]):
+    """Prints diff between current and previous stats."""
+    if not previous:
+        print("No previous stats found. This will be the baseline for future diffs.")
+        return
+    
+    notes_diff = stats["notes"] - previous.get("notes", 0)
+    relations_diff = stats["relations"] - previous.get("relations", 0)
+    zombie_diff = stats.get("zombie_nodes", 0) - previous.get("zombie_nodes", 0)
+    
+    def format_diff(value: int) -> str:
+        if value > 0:
+            return f"+{value}"
+        elif value < 0:
+            return str(value)
+        return "0"
+    
+    print(f"{format_diff(notes_diff)} notes | {format_diff(relations_diff)} relations | {format_diff(zombie_diff)} zombie nodes")
+    
+    if notes_diff == 0 and relations_diff == 0 and zombie_diff == 0:
+        print("No changes since last check.")
+
+
 async def main_async():
     """Async main function."""
     parser = argparse.ArgumentParser(
@@ -263,17 +329,89 @@ async def main_async():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python tools/amem_stats.py --graph
-  python tools/amem_stats.py
+  python tools/amem_stats.py              # Full status (default)
+  python tools/amem_stats.py --compact    # One-line output
+  python tools/amem_stats.py --json        # JSON output
+  python tools/amem_stats.py --diff       # Show changes since last run
+  python tools/amem_stats.py --watch      # Auto-refresh every 5 seconds
+  python tools/amem_stats.py --watch 10   # Auto-refresh every 10 seconds
         """
     )
     parser.add_argument(
-        "--graph",
+        "--compact",
         action="store_true",
-        help="Show graph status (default)"
+        help="Compact one-line output"
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON"
+    )
+    parser.add_argument(
+        "--diff",
+        action="store_true",
+        help="Show changes since last run"
+    )
+    parser.add_argument(
+        "--watch",
+        type=int,
+        nargs="?",
+        const=5,
+        metavar="SECONDS",
+        help="Watch mode: auto-refresh every N seconds (default: 5)"
     )
     
     args = parser.parse_args()
+    
+    # Watch mode
+    if args.watch is not None:
+        import time
+        import os
+        import platform
+        
+        def clear_screen():
+            if platform.system() == "Windows":
+                os.system("cls")
+            else:
+                os.system("clear")
+        
+        try:
+            while True:
+                clear_screen()
+                print(f"🧠 A-MEM Graph Status (refreshing every {args.watch}s, Ctrl+C to stop)\n")
+                
+                # Get stats
+                stats = await get_stats_from_http()
+                if stats is None:
+                    stats = get_stats_from_storage()
+                
+                last_enzyme = get_last_enzyme_run()
+                
+                # Print based on mode
+                if args.compact:
+                    print_compact_status(stats, last_enzyme)
+                elif args.json:
+                    output = {
+                        "notes": stats["notes"],
+                        "relations": stats["relations"],
+                        "zombie_nodes": stats.get("zombie_nodes", 0),
+                        "type_counts": stats.get("type_counts", {}),
+                        "relation_counts": stats.get("relation_counts", {}),
+                        "last_enzyme_run": format_time_ago(last_enzyme.get("timestamp", "")) if last_enzyme else "never",
+                        "data_source": stats.get("source", "unknown")
+                    }
+                    print(json.dumps(output, indent=2))
+                elif args.diff:
+                    previous = get_previous_stats()
+                    print_diff_status(stats, previous)
+                    save_current_stats(stats, last_enzyme)
+                else:
+                    print_graph_status(stats, last_enzyme)
+                
+                time.sleep(args.watch)
+        except KeyboardInterrupt:
+            print("\n\nStopped.")
+            return
     
     # Try HTTP first (live data from running server)
     stats = await get_stats_from_http()
@@ -285,16 +423,116 @@ Examples:
     # Get last enzyme run
     last_enzyme = get_last_enzyme_run()
     
-    # Print status
-    if args.graph or True:  # Default to graph view
-        print_graph_status(stats, last_enzyme)
+    # Print based on mode
+    if args.json:
+        output = {
+            "notes": stats["notes"],
+            "relations": stats["relations"],
+            "zombie_nodes": stats.get("zombie_nodes", 0),
+            "type_counts": stats.get("type_counts", {}),
+            "relation_counts": stats.get("relation_counts", {}),
+            "last_enzyme_run": format_time_ago(last_enzyme.get("timestamp", "")) if last_enzyme else "never",
+            "data_source": stats.get("source", "unknown")
+        }
+        if last_enzyme and last_enzyme.get("data", {}).get("results"):
+            output["last_enzyme_results"] = last_enzyme["data"]["results"]
+        print(json.dumps(output, indent=2))
+    elif args.compact:
+        print_compact_status(stats, last_enzyme)
+    elif args.diff:
+        previous = get_previous_stats()
+        print_diff_status(stats, previous)
+        save_current_stats(stats, last_enzyme)
     else:
-        # Could add other views here
+        # Default: full graph status
         print_graph_status(stats, last_enzyme)
 
 
 def main():
     """Synchronous entry point."""
+    parser = argparse.ArgumentParser(
+        description="A-MEM Graph Status - Live memory system statistics",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python tools/amem_stats.py              # Full status (default)
+  python tools/amem_stats.py --compact    # One-line output
+  python tools/amem_stats.py --json       # JSON output
+  python tools/amem_stats.py --diff       # Show changes since last run
+  python tools/amem_stats.py --watch      # Auto-refresh every 5 seconds
+        """
+    )
+    parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="Compact one-line output"
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON"
+    )
+    parser.add_argument(
+        "--diff",
+        action="store_true",
+        help="Show changes since last run"
+    )
+    parser.add_argument(
+        "--watch",
+        type=int,
+        nargs="?",
+        const=5,
+        metavar="SECONDS",
+        help="Watch mode: auto-refresh every N seconds (default: 5)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Watch mode (sync version)
+    if args.watch is not None:
+        import time
+        import os
+        import platform
+        
+        def clear_screen():
+            if platform.system() == "Windows":
+                os.system("cls")
+            else:
+                os.system("clear")
+        
+        try:
+            while True:
+                clear_screen()
+                print(f"🧠 A-MEM Graph Status (refreshing every {args.watch}s, Ctrl+C to stop)\n")
+                
+                stats = get_stats_from_storage()
+                last_enzyme = get_last_enzyme_run()
+                
+                if args.compact:
+                    print_compact_status(stats, last_enzyme)
+                elif args.json:
+                    output = {
+                        "notes": stats["notes"],
+                        "relations": stats["relations"],
+                        "zombie_nodes": stats.get("zombie_nodes", 0),
+                        "type_counts": stats.get("type_counts", {}),
+                        "relation_counts": stats.get("relation_counts", {}),
+                        "last_enzyme_run": format_time_ago(last_enzyme.get("timestamp", "")) if last_enzyme else "never",
+                        "data_source": stats.get("source", "unknown")
+                    }
+                    print(json.dumps(output, indent=2))
+                elif args.diff:
+                    previous = get_previous_stats()
+                    print_diff_status(stats, previous)
+                    save_current_stats(stats, last_enzyme)
+                else:
+                    print_graph_status(stats, last_enzyme)
+                
+                time.sleep(args.watch)
+        except KeyboardInterrupt:
+            print("\n\nStopped.")
+            return
+    
     if HAS_AIOHTTP:
         import asyncio
         asyncio.run(main_async())
@@ -302,7 +540,26 @@ def main():
         # Fallback: only use disk
         stats = get_stats_from_storage()
         last_enzyme = get_last_enzyme_run()
-        print_graph_status(stats, last_enzyme)
+        
+        if args.json:
+            output = {
+                "notes": stats["notes"],
+                "relations": stats["relations"],
+                "zombie_nodes": stats.get("zombie_nodes", 0),
+                "type_counts": stats.get("type_counts", {}),
+                "relation_counts": stats.get("relation_counts", {}),
+                "last_enzyme_run": format_time_ago(last_enzyme.get("timestamp", "")) if last_enzyme else "never",
+                "data_source": stats.get("source", "unknown")
+            }
+            print(json.dumps(output, indent=2))
+        elif args.compact:
+            print_compact_status(stats, last_enzyme)
+        elif args.diff:
+            previous = get_previous_stats()
+            print_diff_status(stats, previous)
+            save_current_stats(stats, last_enzyme)
+        else:
+            print_graph_status(stats, last_enzyme)
 
 
 if __name__ == "__main__":

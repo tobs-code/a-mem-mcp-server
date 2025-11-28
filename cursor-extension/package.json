@@ -1,0 +1,55 @@
+{
+  "name": "a-mem-inspector",
+  "displayName": "A-MEM Inspector",
+  "description": "Cursor/VS Code extension to inspect and edit the A-MEM knowledge base with a graph view.",
+  "version": "0.0.1",
+  "publisher": "tobi-labs",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:aMemInspector.open"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "aMemInspector.open",
+        "title": "A-MEM: Open Inspector"
+      }
+    ],
+    "configuration": {
+      "title": "A-MEM Inspector",
+      "properties": {
+        "aMemInspector.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to the Python executable that should run the A-MEM CLI."
+        },
+        "aMemInspector.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to mcp_server.py. Leave empty to use <workspace>/mcp_server.py."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.23.0"
+  }
+}
