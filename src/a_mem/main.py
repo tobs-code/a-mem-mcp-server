@@ -7,6 +7,7 @@ Complete MCP Server with tools for Memory Management.
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Sequence
 from mcp.server import Server
@@ -16,6 +17,11 @@ from .core.logic import MemoryController
 from .models.note import NoteInput
 from .utils.enzymes import run_memory_enzymes
 from .config import settings
+
+# Helper function to print to stderr (MCP uses stdout for JSON-RPC)
+def log_debug(message: str):
+    """Logs debug messages to stderr to avoid breaking MCP JSON-RPC on stdout."""
+    print(message, file=sys.stderr)
 
 # Server initialisieren
 server = Server("a-mem")
@@ -213,7 +219,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="run_memory_enzymes",
-            description="Runs memory maintenance enzymes: prunes old/weak links, suggests new relations, and digests overcrowded nodes. Automatically optimizes the graph structure.",
+            description="Runs memory maintenance enzymes: prunes old/weak links, refines duplicate summaries, suggests new relations, and digests overcrowded nodes. Automatically optimizes the graph structure.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -236,8 +242,54 @@ async def list_tools() -> list[Tool]:
                         "type": "integer",
                         "description": "Maximum number of relation suggestions (default: 10).",
                         "default": 10
+                    },
+                    "refine_similarity_threshold": {
+                        "type": "number",
+                        "description": "Minimum similarity threshold for summary refinement (default: 0.75). Notes with similar summaries will be made more specific.",
+                        "default": 0.75
+                    },
+                    "refine_max": {
+                        "type": "integer",
+                        "description": "Maximum number of summaries to refine per run (default: 10).",
+                        "default": 10
+                    },
+                    "auto_add_suggestions": {
+                        "type": "boolean",
+                        "description": "If true, automatically adds suggested relations to the graph instead of just suggesting them (default: false).",
+                        "default": False
+                    },
+                    "ignore_flags": {
+                        "type": "boolean",
+                        "description": "If true, ignores validation flags and forces re-validation of all notes (summary, keywords, tags, edges). Useful for immediate corrections without waiting for flag expiration (default: false).",
+                        "default": False
                     }
                 }
+            }
+        ),
+        Tool(
+            name="research_and_store",
+            description="Performs deep web research on a query and stores the findings as atomic notes. Uses Google Search API (if configured) or DuckDuckGo for web search, Jina Reader (local Docker or cloud) for web content extraction, and Unstructured for PDF extraction. Automatically detects PDF URLs and uses appropriate extraction method. Results are stored as atomic notes in the memory system with automatic linking and evolution.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The research query to search for on the web."
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Optional context about why this research is needed.",
+                        "default": "Manual research request"
+                    },
+                    "max_sources": {
+                        "type": "integer",
+                        "description": "Maximum number of sources to extract and create notes from (default: 1). Lower values = fewer notes, higher values = more comprehensive research.",
+                        "default": 1,
+                        "minimum": 1,
+                        "maximum": 20
+                    }
+                },
+                "required": ["query"]
             }
         )
     ]
@@ -563,7 +615,6 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
         edge_count = len(graph.get("edges", []))
         
         # Log to file
-        from pathlib import Path
         from datetime import datetime
         log_file = Path(settings.DATA_DIR) / "graph_save.log"
         log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -572,7 +623,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             with open(log_file, 'a', encoding='utf-8') as f:
                 f.write(f"[{timestamp}] {msg}\n")
-            print(msg)
+            log_debug(msg)
         
         write_log(f"[INFO] [get_graph] Graph snapshot: {node_count} nodes, {edge_count} edges")
         write_log(f"[INFO] [get_graph] Memory graph: {controller.storage.graph.graph.number_of_nodes()} nodes, {controller.storage.graph.graph.number_of_edges()} edges")
@@ -590,7 +641,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
                     saved_data = json.load(f)
                     saved_nodes = len(saved_data.get("nodes", []))
                     saved_links = len(saved_data.get("links", []))
-                    write_log(f"[OK] [get_graph] Verified saved file: {saved_nodes} nodes, {saved_links} links")
+                    log_debug(f"[OK] [get_graph] Verified saved file: {saved_nodes} nodes, {saved_links} links")
                     if saved_nodes == 0 and node_count > 0:
                         write_log(f"[ERROR] [get_graph] ERROR: Graph had {node_count} nodes but saved file has 0 nodes!")
         
@@ -613,9 +664,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
             prune_min_weight = arguments.get("prune_min_weight", 0.3)
             suggest_threshold = arguments.get("suggest_threshold", 0.75)
             suggest_max = arguments.get("suggest_max", 10)
+            auto_add_suggestions = arguments.get("auto_add_suggestions", False)  # Neu: Auto-Add Relations
             
             # Run enzymes synchronously (in thread)
             loop = asyncio.get_running_loop()
+            
+            refine_similarity = arguments.get("refine_similarity_threshold", 0.75)  # Niedrigerer Default für bessere Erkennung
+            refine_max = arguments.get("refine_max", 10)
+            ignore_flags = arguments.get("ignore_flags", False)  # Neu: Flags ignorieren
             
             def _run_enzymes():
                 return run_memory_enzymes(
@@ -628,7 +684,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
                     suggest_config={
                         "threshold": suggest_threshold,
                         "max_suggestions": suggest_max
-                    }
+                    },
+                    refine_config={
+                        "similarity_threshold": refine_similarity,
+                        "max_refinements": refine_max
+                    },
+                    auto_add_suggestions=auto_add_suggestions,
+                    ignore_flags=ignore_flags
                 )
             
             results = await loop.run_in_executor(None, _run_enzymes)
@@ -640,21 +702,249 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
                 "prune_max_age_days": prune_max_age,
                 "prune_min_weight": prune_min_weight,
                 "suggest_threshold": suggest_threshold,
-                "suggest_max": suggest_max
+                "suggest_max": suggest_max,
+                "refine_similarity_threshold": refine_similarity,
+                "refine_max": refine_max
             })
             
             # Save graph after enzymes
             await loop.run_in_executor(None, controller.storage.graph.save_snapshot)
             
+            summaries_refined = results.get("summaries_refined", 0)
+            suggestions = results.get("suggestions", [])
+            relations_added = results.get("relations_auto_added", 0)
+            
+            duplicates_merged = results.get("duplicates_merged", 0)
+            self_loops_removed = results.get("self_loops_removed", 0)
+            isolated_nodes = results.get("isolated_nodes_found", 0)
+            isolated_linked = results.get("isolated_nodes_linked", 0)
+            low_quality_removed = results.get("low_quality_notes_removed", 0)
+            notes_validated = results.get("notes_validated", 0)
+            notes_corrected = results.get("notes_corrected", 0)
+            
+            message_parts = [
+                f"{results['pruned_count']} links pruned",
+                f"{results.get('zombie_nodes_removed', 0)} zombie nodes removed"
+            ]
+            
+            if low_quality_removed > 0:
+                message_parts.append(f"{low_quality_removed} low-quality notes removed")
+            
+            if self_loops_removed > 0:
+                message_parts.append(f"{self_loops_removed} self-loops removed")
+            
+            if duplicates_merged > 0:
+                message_parts.append(f"{duplicates_merged} duplicates merged")
+            
+            if notes_validated > 0:
+                message_parts.append(f"{notes_validated} notes validated")
+            
+            if notes_corrected > 0:
+                message_parts.append(f"{notes_corrected} notes corrected")
+            
+            quality_scores_calculated = results.get("quality_scores_calculated", 0)
+            low_quality_count = len(results.get("low_quality_notes", []))
+            
+            if quality_scores_calculated > 0:
+                message_parts.append(f"{quality_scores_calculated} quality scores calculated")
+            if low_quality_count > 0:
+                message_parts.append(f"{low_quality_count} low-quality notes found")
+            
+            keywords_normalized = results.get("keywords_normalized", 0)
+            keywords_removed = results.get("keywords_removed", 0)
+            keywords_corrected = results.get("keywords_corrected", 0)
+            
+            if keywords_normalized > 0:
+                message_parts.append(f"{keywords_normalized} keywords normalized")
+            if keywords_removed > 0:
+                message_parts.append(f"{keywords_removed} keywords removed")
+            if keywords_corrected > 0:
+                message_parts.append(f"{keywords_corrected} keywords corrected")
+            
+            if isolated_nodes > 0:
+                message_parts.append(f"{isolated_nodes} isolated nodes found")
+            
+            if isolated_linked > 0:
+                message_parts.append(f"{isolated_linked} isolated nodes auto-linked")
+            
+            edges_removed = results.get("edges_removed", 0)
+            reasonings_added = results.get("reasonings_added", 0)
+            types_standardized = results.get("types_standardized", 0)
+            
+            if edges_removed > 0:
+                message_parts.append(f"{edges_removed} weak edges removed")
+            if reasonings_added > 0:
+                message_parts.append(f"{reasonings_added} reasonings added")
+            if types_standardized > 0:
+                message_parts.append(f"{types_standardized} relation types standardized")
+            
+            message_parts.extend([
+                f"{summaries_refined} summaries refined",
+                f"{results['suggestions_count']} relations suggested"
+            ])
+            
+            if relations_added > 0:
+                message_parts.append(f"{relations_added} relations auto-added")
+            
+            message_parts.append(f"{results['digested_count']} nodes digested")
+            
+            isolated_nodes_list = results.get("isolated_nodes", [])
+            
+            response_data = {
+                "status": "success",
+                "results": results,
+                "message": f"Enzymes completed: {', '.join(message_parts)}.",
+                "suggested_relations": suggestions  # Vorgeschlagene Relations für User-Review
+            }
+            
+            if isolated_nodes_list:
+                response_data["isolated_nodes"] = isolated_nodes_list  # Isolierte Nodes für User-Review
+            
+            low_quality_notes = results.get("low_quality_notes", [])
+            if low_quality_notes:
+                response_data["low_quality_notes"] = low_quality_notes  # Notes mit niedrigem Quality-Score
+            
+            return [TextContent(
+                type="text",
+                text=json.dumps(response_data, indent=2, ensure_ascii=False)
+            )]
+        except Exception as e:
+            return [TextContent(
+                type="text",
+                text=json.dumps({"error": str(e)}, indent=2)
+        )]
+    
+    elif name == "research_and_store":
+        query = arguments.get("query", "")
+        context = arguments.get("context", "Manual research request")
+        max_sources = arguments.get("max_sources", 1)
+        
+        if not query:
+            return [TextContent(
+                type="text",
+                text=json.dumps({"error": "query is required"}, indent=2)
+            )]
+        
+        # Validate max_sources
+        try:
+            max_sources = int(max_sources)
+            if max_sources < 1 or max_sources > 20:
+                max_sources = 1  # Reset to default if out of range
+        except (ValueError, TypeError):
+            max_sources = 1  # Reset to default if invalid
+        
+        try:
+            from .utils.researcher import ResearcherAgent
+            from .utils.priority import log_event
+            
+            log_debug(f"[RESEARCHER] Starting research for: {query} (max_sources: {max_sources})")
+            log_event("RESEARCHER_MANUAL_RUN_START", {
+                "query": query,
+                "context": context,
+                "max_sources": max_sources
+            })
+            
+            # Initialize researcher with configurable max_sources
+            # Note: MCP tool callback is not available in this context (would require MCP client)
+            # Researcher will use HTTP-based fallbacks (Google Search API, DuckDuckGo, Jina Reader HTTP)
+            researcher = ResearcherAgent(llm_service=controller.llm, max_sources=max_sources, mcp_tool_callback=None)
+            
+            # Researcher Agent uses HTTP-based tools (researcher_tools.py) by default:
+            # Strategy: HTTP-based tools (Google Search API, DuckDuckGo HTTP, Jina Reader HTTP)
+            # If MCP tools are available via callback, they will be tried first, then HTTP fallbacks.
+            
+            # Perform research (uses HTTP-based tools directly)
+            research_notes = await researcher.research(query=query, context=context)
+            
+            if not research_notes:
+                # Provide helpful error message about why research failed
+                error_details = []
+                from ..config import settings
+                
+                if not settings.GOOGLE_SEARCH_ENABLED or not settings.GOOGLE_API_KEY:
+                    error_details.append("Google Search API not configured (check GOOGLE_API_KEY and GOOGLE_SEARCH_ENGINE_ID)")
+                
+                if not settings.JINA_READER_ENABLED:
+                    error_details.append("Jina Reader not enabled (check JINA_READER_ENABLED)")
+                
+                return [TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "status": "info",
+                        "message": "Research tool executed but no notes created. Possible reasons: no search results found, content extraction failed, or all content was filtered as irrelevant.",
+                        "notes_created": 0,
+                        "notes_stored": 0,
+                        "debug_info": {
+                            "query": query,
+                            "max_sources": max_sources,
+                            "possible_issues": error_details if error_details else [
+                                "No search results found for query",
+                                "Content extraction failed (check Jina Reader/Unstructured)",
+                                "All extracted content was filtered as irrelevant",
+                                "Check server console output for detailed error messages"
+                            ]
+                        },
+                        "tip": "Check server console output for detailed debug messages (prefixed with [RESEARCHER])"
+                    }, indent=2)
+                )]
+            
+            # Store research notes
+            notes_stored = []
+            notes_failed = []
+            
+            for note in research_notes:
+                try:
+                    # Pass full metadata from ResearcherAgent (avoids duplicate LLM extraction)
+                    note_input = NoteInput(
+                        content=note.content,
+                        source="researcher_agent",
+                        contextual_summary=note.contextual_summary,
+                        keywords=note.keywords,
+                        tags=note.tags,
+                        type=note.type,
+                        metadata=note.metadata
+                    )
+                    note_id = await controller.create_note(note_input)
+                    notes_stored.append({
+                        "id": note_id,
+                        "summary": note.contextual_summary,
+                        "type": note.type,
+                        "source_url": note.metadata.get("source_url", "N/A")
+                    })
+                except Exception as e:
+                    notes_failed.append({
+                        "error": str(e),
+                        "note_id": note.id[:8] if note else "unknown"
+                    })
+            
+            # Log event
+            log_event("RESEARCHER_MANUAL_RUN", {
+                "query": query,
+                "context": context,
+                "notes_created": len(research_notes),
+                "notes_stored": len(notes_stored),
+                "notes_failed": len(notes_failed)
+            })
+            
             return [TextContent(
                 type="text",
                 text=json.dumps({
                     "status": "success",
-                    "results": results,
-                    "message": f"Enzymes completed: {results['pruned_count']} links pruned, {results.get('zombie_nodes_removed', 0)} zombie nodes removed, {results['suggestions_count']} relations suggested, {results['digested_count']} nodes digested."
-                }, indent=2)
+                    "message": f"Research completed: {len(notes_stored)} notes stored",
+                    "query": query,
+                    "notes_created": len(research_notes),
+                    "notes_stored": len(notes_stored),
+                    "notes_failed": len(notes_failed),
+                    "stored_notes": notes_stored,
+                    "failed_notes": notes_failed if notes_failed else None
+                }, indent=2, ensure_ascii=False)
             )]
         except Exception as e:
+            from .utils.priority import log_event
+            log_event("RESEARCHER_ERROR", {
+                "query": query,
+                "error": str(e)
+            })
             return [TextContent(
                 type="text",
                 text=json.dumps({"error": str(e)}, indent=2)
@@ -671,7 +961,7 @@ async def main():
     # Initial save: Save graph to disk on startup so visualizer can access it
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, controller.storage.graph.save_snapshot)
-    print("[SAVE] Initial graph snapshot saved to disk")
+    log_debug("[SAVE] Initial graph snapshot saved to disk")
     
     # Starte automatischen Enzyme-Scheduler (alle 1 Stunde)
     # Auto-Save alle 5 Minuten, damit Visualizer die Daten sehen kann
@@ -694,7 +984,7 @@ async def main():
             await runner.setup()
             site = web.TCPSite(runner, settings.TCP_SERVER_HOST, settings.TCP_SERVER_PORT)
             await site.start()
-            print(f"[HTTP] HTTP-Server gestartet auf http://{settings.TCP_SERVER_HOST}:{settings.TCP_SERVER_PORT}/get_graph")
+            log_debug(f"[HTTP] HTTP-Server gestartet auf http://{settings.TCP_SERVER_HOST}:{settings.TCP_SERVER_PORT}/get_graph")
             # Lauf ewig
             await asyncio.Event().wait()
         
@@ -716,11 +1006,11 @@ async def main():
                     await http_task
                 except asyncio.CancelledError:
                     pass
-                print("[STOP] HTTP-Server gestoppt")
+                log_debug("[STOP] HTTP-Server gestoppt")
             
             # Final save: Save graph to disk on shutdown
             await loop.run_in_executor(None, controller.storage.graph.save_snapshot)
-            print("[SAVE] Final graph snapshot saved to disk")
+            log_debug("[SAVE] Final graph snapshot saved to disk")
             # Stoppe Scheduler beim Shutdown
             controller.stop_enzyme_scheduler()
 
