@@ -524,19 +524,19 @@ cat data/events.jsonl | jq .
 Aktualisierte Mermaid-basierte SVG-Diagramme mit weißem Hintergrund und schwarzer Schrift:
 
 #### System-Architektur Übersicht
-![System Architecture](docs/a-mem-system-architecture.svg)
+<img src="docs/a-mem-system-architecture.svg" alt="System Architecture" width="1600" style="max-width: 100%; height: auto;">
 
 #### Storage-Architektur Detail
-![Storage Architecture](docs/a-mem-storage-architecture.svg)
+<img src="docs/a-mem-storage-architecture.svg" alt="Storage Architecture" width="1600" style="max-width: 100%; height: auto;">
 
 #### Memory Enzymes Workflow
-![Memory Enzymes](docs/a-mem-memory-enzymes.svg)
+<img src="docs/a-mem-memory-enzymes.svg" alt="Memory Enzymes" width="1600" style="max-width: 100%; height: auto;">
 
 #### MCP Tools Übersicht
-![MCP Tools](docs/a-mem-mcp-tools.svg)
+<img src="docs/a-mem-mcp-tools.svg" alt="MCP Tools" width="1600" style="max-width: 100%; height: auto;">
 
 #### Type Classification System
-![Type Classification](docs/a-mem-type-classification.svg)
+<img src="docs/a-mem-type-classification.svg" alt="Type Classification" width="1600" style="max-width: 100%; height: auto;">
 
 **Vollständige Mermaid-Diagramme** (inkl. Sequence Diagrams, Workflows) finden Sie in:
 - `docs/ARCHITECTURE_DIAGRAM.md` - Vollständige Architektur-Darstellung mit allen Diagrammen
