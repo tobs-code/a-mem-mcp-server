@@ -219,7 +219,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="run_memory_enzymes",
-            description="Runs memory maintenance enzymes: prunes old/weak links, refines duplicate summaries, suggests new relations, and digests overcrowded nodes. Automatically optimizes the graph structure.",
+            description="Runs comprehensive memory maintenance enzymes: repairs corrupted nodes, prunes old/weak links and zombie nodes, validates and corrects note types/keywords/tags, refines duplicate summaries, suggests new relations, links isolated nodes, digests overcrowded nodes, performs temporal cleanup (archives old notes), calculates graph health score, and detects dead-end nodes. Automatically optimizes the entire graph structure.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -821,6 +821,30 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
             
             message_parts.append(f"{results['digested_count']} nodes digested")
             
+            # Neue Funktionen
+            types_validated = results.get("types_validated", 0)
+            types_corrected = results.get("types_corrected", 0)
+            if types_validated > 0:
+                message_parts.append(f"{types_validated} types validated")
+            if types_corrected > 0:
+                message_parts.append(f"{types_corrected} types corrected")
+            
+            notes_archived = results.get("notes_archived", 0)
+            notes_deleted = results.get("notes_deleted", 0)
+            if notes_archived > 0:
+                message_parts.append(f"{notes_archived} notes archived")
+            if notes_deleted > 0:
+                message_parts.append(f"{notes_deleted} notes deleted")
+            
+            graph_health_score = results.get("graph_health_score")
+            graph_health_level = results.get("graph_health_level", "unknown")
+            if graph_health_score is not None:
+                message_parts.append(f"graph health: {graph_health_score:.2f} ({graph_health_level})")
+            
+            dead_end_count = results.get("dead_end_nodes_found", 0)
+            if dead_end_count > 0:
+                message_parts.append(f"{dead_end_count} dead-end nodes found")
+            
             isolated_nodes_list = results.get("isolated_nodes", [])
             
             response_data = {
@@ -836,6 +860,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> Sequence[TextConten
             low_quality_notes = results.get("low_quality_notes", [])
             if low_quality_notes:
                 response_data["low_quality_notes"] = low_quality_notes  # Notes mit niedrigem Quality-Score
+            
+            # Neue Funktionen: Graph Health & Dead-Ends
+            graph_health_details = results.get("graph_health_details")
+            if graph_health_details:
+                response_data["graph_health_details"] = graph_health_details
+            
+            dead_end_nodes = results.get("dead_end_nodes", [])
+            if dead_end_nodes:
+                response_data["dead_end_nodes"] = dead_end_nodes
             
             # Add validation warnings if any
             validation_warnings = results.get("validation_warnings", [])

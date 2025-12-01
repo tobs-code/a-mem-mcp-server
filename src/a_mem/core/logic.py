@@ -364,11 +364,30 @@ class MemoryController:
             for node_id, attrs in self.storage.graph.graph.nodes(data=True):
                 data = dict(attrs)
                 data.setdefault("id", node_id)
+                
+                # Fix None values to defaults for AtomicNote
+                if data.get("contextual_summary") is None:
+                    data["contextual_summary"] = ""
+                if data.get("keywords") is None:
+                    data["keywords"] = []
+                if data.get("tags") is None:
+                    data["tags"] = []
+                if data.get("metadata") is None:
+                    data["metadata"] = {}
+                if data.get("content") is None:
+                    data["content"] = ""  # Skip notes without content
+                # Ensure created_at exists (required field)
+                if "created_at" not in data or data.get("created_at") is None:
+                    from datetime import datetime
+                    data["created_at"] = datetime.now()
+                
                 try:
                     note = AtomicNote(**data)
                     notes.append(serialize_note(note))
                 except Exception as exc:
-                    notes.append({"id": node_id, "error": str(exc)})
+                    # Skip invalid notes instead of returning error dict
+                    log_debug(f"Warning: Skipping invalid note {node_id}: {exc}")
+                    continue
             return notes
 
         return await loop.run_in_executor(None, _collect)

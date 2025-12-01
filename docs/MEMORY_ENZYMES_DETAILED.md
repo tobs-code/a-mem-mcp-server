@@ -1261,7 +1261,7 @@ Enzyme prüfen Flags und verarbeiten nur notwendige Notes.
 
 ---
 
-## Vollständige Liste aller Enzyme-Operations (14+)
+## Vollständige Liste aller Enzyme-Operations (18+)
 
 1. **repair_corrupted_nodes** - Repariert korrupte Nodes (zuerst ausgeführt)
 2. **prune_links** - Entfernt alte/schwache Links
@@ -1271,12 +1271,16 @@ Enzyme prüfen Flags und verarbeiten nur notwendige Notes.
 6. **validate_and_fix_edges** - Validiert und korrigiert Edges
 7. **merge_duplicates** - Merged Duplikate (exakt und semantisch)
 8. **normalize_and_clean_keywords** - Normalisiert und bereinigt Keywords
-9. **validate_notes** - Validiert und korrigiert Notes
-10. **calculate_quality_score** - Berechnet Quality-Scores (wird von anderen Enzymes genutzt)
-11. **refine_summaries** - Verfeinert ähnliche Summarys
-12. **suggest_relations** - Schlägt neue Relations vor
-13. **link_isolated_nodes** - Verlinkt isolierte Nodes
-14. **digest_node** - Komprimiert überfüllte Nodes
+9. **validate_note_types** - Validiert und korrigiert Note-Types (NEU)
+10. **validate_notes** - Validiert und korrigiert Notes
+11. **calculate_quality_score** - Berechnet Quality-Scores (wird von anderen Enzymes genutzt)
+12. **refine_summaries** - Verfeinert ähnliche Summarys
+13. **suggest_relations** - Schlägt neue Relations vor
+14. **link_isolated_nodes** - Verlinkt isolierte Nodes
+15. **digest_node** - Komprimiert überfüllte Nodes
+16. **temporal_note_cleanup** - Archiviert/löscht alte Notes (NEU)
+17. **calculate_graph_health_score** - Berechnet Graph Health Score (NEU)
+18. **find_dead_end_nodes** - Findet Dead-End Nodes (NEU)
 
-**Letzte Aktualisierung:** 2025-11-29
+**Letzte Aktualisierung:** 2025-12-01
 

@@ -842,10 +842,18 @@ def link_isolated_nodes(
         graph: GraphStore Instanz
         llm_service: LLMService für Embedding-Berechnung
         similarity_threshold: Minimale Similarity für Verlinkung (default: 0.70, niedriger als suggest_relations)
+            Wird dynamisch auf 0.50 reduziert, wenn gemeinsame Tags/Keywords vorhanden sind
         max_links_per_node: Maximale Anzahl Links pro isoliertem Node (default: 3)
     
     Returns:
         Anzahl erstellter Links
+    
+    Note:
+        Die Funktion verwendet einen dynamischen Similarity-Threshold:
+        - Standard: similarity_threshold (default: 0.70)
+        - Bei gemeinsamen Tags/Keywords: 0.50 (reduziert um ~30%)
+        - Gemeinsame Tags/Keywords sind ein starkes Signal für Relevanz und ermöglichen
+          Verlinkung auch bei niedrigerer Embedding-Similarity
     """
     if not isolated_node_ids:
         return 0
@@ -897,11 +905,17 @@ def link_isolated_nodes(
             # Pre-Filter: Gemeinsame Keywords/Tags erhöhen Wahrscheinlichkeit
             common_keywords = set(isolated_note.keywords) & set(other_note.keywords)
             common_tags = set(isolated_note.tags) & set(other_note.tags)
+            has_common_attributes = bool(common_keywords or common_tags)
             
-            # Wenn Similarity hoch genug ODER gemeinsame Keywords/Tags vorhanden
-            if similarity >= similarity_threshold or common_keywords or common_tags:
+            # Dynamischer Threshold: Niedrigerer Threshold wenn gemeinsame Tags/Keywords vorhanden
+            # Gemeinsame Tags/Keywords sind ein starkes Signal für Relevanz
+            # Reduziere Threshold um 30% (von 0.70 auf 0.50) wenn gemeinsame Attribute vorhanden
+            effective_threshold = 0.50 if has_common_attributes else similarity_threshold
+            
+            # Wenn Similarity hoch genug (mit dynamischem Threshold) ODER gemeinsame Keywords/Tags vorhanden
+            if similarity >= effective_threshold or has_common_attributes:
                 # Bonus für gemeinsame Keywords/Tags
-                bonus = 0.1 if (common_keywords or common_tags) else 0.0
+                bonus = 0.1 if has_common_attributes else 0.0
                 candidates.append((other_id, similarity + bonus, len(common_keywords) + len(common_tags)))
         
         # Sortiere Kandidaten nach Similarity + Bonus
@@ -1407,10 +1421,12 @@ def validate_notes(
         if metadata is None:
             metadata = {}
         summary_flag = metadata.get("summary_validated_at")
-        should_validate_summary = ignore_flags or _is_flag_too_old(summary_flag, max_flag_age_days)
+        # CRITICAL: Wenn Summary fehlt/leer ist, IMMER erstellen (unabhängig von Flags)
+        summary_missing = not note.contextual_summary or len(note.contextual_summary.strip()) < 10
+        should_validate_summary = summary_missing or ignore_flags or _is_flag_too_old(summary_flag, max_flag_age_days)
         
         if should_validate_summary:
-            if not note.contextual_summary or len(note.contextual_summary.strip()) < 10:
+            if summary_missing:
                 issues["missing_summary"] += 1
                 node_issues.append("missing_summary")
                 needs_correction = True
@@ -1494,10 +1510,12 @@ Wenn NEIN, gib einen besseren Summary (max 100 Zeichen) zurück."""
         if metadata is None:
             metadata = {}
         keywords_flag = metadata.get("keywords_validated_at")
-        should_validate_keywords = ignore_flags or _is_flag_too_old(keywords_flag, max_flag_age_days)
+        # CRITICAL: Wenn Keywords fehlen/leer sind, IMMER erstellen (unabhängig von Flags)
+        keywords_missing = not note.keywords or len(note.keywords) < 2
+        should_validate_keywords = keywords_missing or ignore_flags or _is_flag_too_old(keywords_flag, max_flag_age_days)
         
         if should_validate_keywords:
-            if not note.keywords or len(note.keywords) < 2:
+            if keywords_missing:
                 issues["empty_keywords"] += 1
                 node_issues.append("empty_keywords")
                 needs_correction = True
@@ -1582,15 +1600,93 @@ Wenn NEIN, gib eine komma-separierte Liste mit 3-5 besseren Keywords zurück."""
                     metadata["keywords_validated_at"] = now_iso
                     graph.graph.nodes[node_id]["metadata"] = metadata
         
+        # Prüfe Type (mit Flag-Check)
+        type_flag = metadata.get("type_validated_at")
+        should_validate_type = not note.type or ignore_flags or _is_flag_too_old(type_flag, max_flag_age_days)
+        
+        if should_validate_type:
+            if not note.type or note.type not in valid_types:
+                issues["invalid_type"] += 1
+                node_issues.append("invalid_type")
+                needs_correction = True
+                
+                # Auto-Korrektur: Bestimme Type basierend auf Content
+                if llm_service and note.content and len(note.content.strip()) >= 50:
+                    try:
+                        prompt = f"""Bestimme den Type dieser Note basierend auf dem Content. Mögliche Types: rule, procedure, concept, tool, reference, integration.
+
+Content:
+{note.content[:500]}
+
+Antworte nur mit einem der Types: rule, procedure, concept, tool, reference, integration"""
+                        response = llm_service._call_llm(prompt)
+                        response_lower = response.strip().lower()
+                        
+                        # Extrahiere Type aus Response
+                        detected_type = None
+                        for valid_type in valid_types:
+                            if valid_type in response_lower:
+                                detected_type = valid_type
+                                break
+                        
+                        if not detected_type:
+                            # Fallback: Bestimme Type basierend auf Keywords/Content
+                            content_lower = note.content.lower()
+                            if any(kw in content_lower for kw in ["how to", "anleitung", "schritt", "tutorial", "setup"]):
+                                detected_type = "procedure"
+                            elif any(kw in content_lower for kw in ["tool", "werkzeug", "utility", "script"]):
+                                detected_type = "tool"
+                            elif any(kw in content_lower for kw in ["regel", "rule", "guideline", "best practice"]):
+                                detected_type = "rule"
+                            elif any(kw in content_lower for kw in ["konzept", "concept", "theorie", "theory"]):
+                                detected_type = "concept"
+                            elif any(kw in content_lower for kw in ["referenz", "reference", "dokumentation", "docs"]):
+                                detected_type = "reference"
+                            else:
+                                detected_type = "concept"  # Default
+                        
+                        if detected_type:
+                            note.type = detected_type
+                            graph.graph.nodes[node_id]["type"] = detected_type
+                            metadata["type_validated_at"] = now_iso
+                            graph.graph.nodes[node_id]["metadata"] = metadata
+                            corrected_count += 1
+                            log_event("NOTE_TYPE_AUTO_CORRECTED", {
+                                "node_id": node_id,
+                                "old_type": note.type,
+                                "new_type": detected_type
+                            })
+                    except Exception as e:
+                        log_debug(f"Error auto-correcting type for {node_id}: {e}")
+                        # Fallback: Setze Default-Type
+                        if not note.type:
+                            note.type = "concept"
+                            graph.graph.nodes[node_id]["type"] = "concept"
+                            metadata["type_validated_at"] = now_iso
+                            graph.graph.nodes[node_id]["metadata"] = metadata
+                else:
+                    # Kein LLM, setze Default-Type
+                    if not note.type:
+                        note.type = "concept"
+                        graph.graph.nodes[node_id]["type"] = "concept"
+                        metadata["type_validated_at"] = now_iso
+                        graph.graph.nodes[node_id]["metadata"] = metadata
+            else:
+                # Type ist gültig, setze Flag
+                metadata["type_validated_at"] = now_iso
+                graph.graph.nodes[node_id]["metadata"] = metadata
+        
         # Prüfe Tags (mit Flag-Check)
         # Handle None metadata gracefully (metadata might have been reassigned)
         if metadata is None:
             metadata = {}
         tags_flag = metadata.get("tags_validated_at")
-        should_validate_tags = ignore_flags or _is_flag_too_old(tags_flag, max_flag_age_days)
+        # CRITICAL: Wenn Tags fehlen/leer sind, IMMER erstellen (unabhängig von Flags)
+        tags_missing = not note.tags or len(note.tags) < 1
+        should_validate_tags = tags_missing or ignore_flags or _is_flag_too_old(tags_flag, max_flag_age_days)
         
         if should_validate_tags:
-            if not note.tags or len(note.tags) < 1:
+            if tags_missing:
                 issues["empty_tags"] += 1
                 node_issues.append("empty_tags")
                 needs_correction = True
@@ -1739,20 +1835,8 @@ Wenn NEIN, gib eine komma-separierte Liste mit 2-3 besseren Tags zurück."""
                     metadata["tags_validated_at"] = now_iso
                     graph.graph.nodes[node_id]["metadata"] = metadata
         
-        # Prüfe Type
-        if not note.type or note.type not in valid_types:
-            issues["invalid_type"] += 1
-            node_issues.append("invalid_type")
-            needs_correction = True
-            
-            # Auto-Korrektur: Setze Default Type
-            note.type = "reference"
-            graph.graph.nodes[node_id]["type"] = "reference"
-            corrected_count += 1
-            log_event("NOTE_TYPE_AUTO_CORRECTED", {
-                "node_id": node_id,
-                "new_type": "reference"
-            })
+        # Type-Validierung wird jetzt in validate_note_types() gemacht
+        # Hier nur noch prüfen ob Type vorhanden ist für Quality-Score
         
         # Berechne Quality-Score
         quality_data = calculate_quality_score(note, graph, node_id)
@@ -2353,6 +2437,458 @@ def repair_corrupted_nodes(graph: GraphStore) -> int:
     return repaired_count
 
 
+def validate_note_types(
+    notes: Dict[str, AtomicNote],
+    graph: GraphStore,
+    llm_service: Optional[LLMService] = None,
+    ignore_flags: bool = False
+) -> Dict[str, Any]:
+    """
+    Validiert und korrigiert Note-Types.
+    
+    Prüft ob Type vorhanden und gültig ist (rule, procedure, concept, tool, reference, integration).
+    Korrigiert ungültige Types basierend auf Content.
+    
+    Args:
+        notes: Dict von note_id -> AtomicNote
+        graph: GraphStore Instanz
+        llm_service: Optional LLMService für Type-Erkennung
+        ignore_flags: Ignoriere Flags (default: False)
+    
+    Returns:
+        Dict mit:
+        - "types_validated": Anzahl validierte Types
+        - "types_corrected": Anzahl korrigierte Types
+        - "invalid_types": Liste von Node-IDs mit ungültigen Types
+    """
+    if len(notes) == 0:
+        return {
+            "types_validated": 0,
+            "types_corrected": 0,
+            "invalid_types": []
+        }
+    
+    valid_types = ["rule", "procedure", "concept", "tool", "reference", "integration"]
+    validated_count = 0
+    corrected_count = 0
+    invalid_types = []
+    now_iso = datetime.utcnow().isoformat()
+    
+    for node_id, note in notes.items():
+        if node_id not in graph.graph.nodes:
+            continue
+        
+        # Initialisiere Metadata falls nicht vorhanden
+        if not note.metadata:
+            note.metadata = {}
+            graph.graph.nodes[node_id]["metadata"] = {}
+        
+        metadata = note.metadata
+        type_flag = metadata.get("type_validated_at")
+        should_validate = not note.type or note.type not in valid_types or ignore_flags or _is_flag_too_old(type_flag, 30)
+        
+        if should_validate:
+            if not note.type or note.type not in valid_types:
+                invalid_types.append(node_id)
+                
+                # Auto-Korrektur: Bestimme Type basierend auf Content
+                if llm_service and note.content and len(note.content.strip()) >= 50:
+                    try:
+                        prompt = f"""Bestimme den Type dieser Note basierend auf dem Content. Mögliche Types: rule, procedure, concept, tool, reference, integration.
+
+Content:
+{note.content[:500]}
+
+Antworte nur mit einem der Types: rule, procedure, concept, tool, reference, integration"""
+                        response = llm_service._call_llm(prompt)
+                        response_lower = response.strip().lower()
+                        
+                        # Extrahiere Type aus Response
+                        detected_type = None
+                        for valid_type in valid_types:
+                            if valid_type in response_lower:
+                                detected_type = valid_type
+                                break
+                        
+                        if not detected_type:
+                            # Fallback: Bestimme Type basierend auf Keywords/Content
+                            content_lower = note.content.lower()
+                            if any(kw in content_lower for kw in ["how to", "anleitung", "schritt", "tutorial", "setup", "install"]):
+                                detected_type = "procedure"
+                            elif any(kw in content_lower for kw in ["tool", "werkzeug", "utility", "script", "command"]):
+                                detected_type = "tool"
+                            elif any(kw in content_lower for kw in ["regel", "rule", "guideline", "best practice", "should", "must"]):
+                                detected_type = "rule"
+                            elif any(kw in content_lower for kw in ["konzept", "concept", "theorie", "theory", "idea", "principle"]):
+                                detected_type = "concept"
+                            elif any(kw in content_lower for kw in ["referenz", "reference", "dokumentation", "docs", "api", "spec"]):
+                                detected_type = "reference"
+                            else:
+                                detected_type = "concept"  # Default
+                        
+                        if detected_type:
+                            old_type = note.type
+                            note.type = detected_type
+                            graph.graph.nodes[node_id]["type"] = detected_type
+                            metadata["type_validated_at"] = now_iso
+                            graph.graph.nodes[node_id]["metadata"] = metadata
+                            corrected_count += 1
+                            log_event("NOTE_TYPE_CORRECTED", {
+                                "node_id": node_id,
+                                "old_type": old_type,
+                                "new_type": detected_type
+                            })
+                    except Exception as e:
+                        log_debug(f"Error correcting type for {node_id}: {e}")
+                        # Fallback: Setze Default-Type
+                        if not note.type:
+                            note.type = "concept"
+                            graph.graph.nodes[node_id]["type"] = "concept"
+                            metadata["type_validated_at"] = now_iso
+                            graph.graph.nodes[node_id]["metadata"] = metadata
+                            corrected_count += 1
+                else:
+                    # Kein LLM, setze Default-Type
+                    if not note.type:
+                        note.type = "concept"
+                        graph.graph.nodes[node_id]["type"] = "concept"
+                        metadata["type_validated_at"] = now_iso
+                        graph.graph.nodes[node_id]["metadata"] = metadata
+                        corrected_count += 1
+            
+            # Setze Flag auch wenn Type bereits gültig war
+            metadata["type_validated_at"] = now_iso
+            graph.graph.nodes[node_id]["metadata"] = metadata
+            validated_count += 1
+    
+    if validated_count > 0 or corrected_count > 0:
+        log_event("NOTE_TYPES_VALIDATED", {
+            "validated": validated_count,
+            "corrected": corrected_count,
+            "invalid_count": len(invalid_types)
+        })
+    
+    return {
+        "types_validated": validated_count,
+        "types_corrected": corrected_count,
+        "invalid_types": invalid_types
+    }
+
+
+def temporal_note_cleanup(
+    notes: Dict[str, AtomicNote],
+    graph: GraphStore,
+    max_age_days: int = 365,
+    archive_instead_of_delete: bool = True
+) -> Dict[str, Any]:
+    """
+    Prüft Notes älter als max_age_days und archiviert/löscht sie optional.
+    
+    Args:
+        notes: Dict von note_id -> AtomicNote
+        graph: GraphStore Instanz
+        max_age_days: Maximale Alter in Tagen (default: 365 = 1 Jahr)
+        archive_instead_of_delete: Wenn True, markiert Notes als archiviert statt zu löschen (default: True)
+    
+    Returns:
+        Dict mit:
+        - "notes_checked": Anzahl geprüfte Notes
+        - "notes_archived": Anzahl archivierte Notes
+        - "notes_deleted": Anzahl gelöschte Notes (wenn archive_instead_of_delete=False)
+        - "old_notes": Liste von Node-IDs mit alten Notes
+    """
+    if len(notes) == 0:
+        return {
+            "notes_checked": 0,
+            "notes_archived": 0,
+            "notes_deleted": 0,
+            "old_notes": []
+        }
+    
+    now = datetime.utcnow()
+    old_notes = []
+    archived_count = 0
+    deleted_count = 0
+    
+    for node_id, note in notes.items():
+        if node_id not in graph.graph.nodes:
+            continue
+        
+        # Prüfe created_at
+        if note.created_at:
+            try:
+                if isinstance(note.created_at, str):
+                    created_date = datetime.fromisoformat(note.created_at.replace('Z', '+00:00'))
+                else:
+                    created_date = note.created_at
+                
+                age_days = (now - created_date.replace(tzinfo=None)).days
+                
+                if age_days > max_age_days:
+                    old_notes.append({
+                        "id": node_id,
+                        "age_days": age_days,
+                        "created_at": note.created_at.isoformat() if hasattr(note.created_at, 'isoformat') else str(note.created_at),
+                        "summary": note.contextual_summary[:100] if note.contextual_summary else "N/A"
+                    })
+                    
+                    if archive_instead_of_delete:
+                        # Markiere als archiviert
+                        if not note.metadata:
+                            note.metadata = {}
+                            graph.graph.nodes[node_id]["metadata"] = {}
+                        
+                        note.metadata["archived"] = True
+                        note.metadata["archived_at"] = now.isoformat()
+                        graph.graph.nodes[node_id]["metadata"] = note.metadata
+                        archived_count += 1
+                        
+                        log_event("NOTE_ARCHIVED", {
+                            "node_id": node_id,
+                            "age_days": age_days
+                        })
+                    else:
+                        # Lösche Note (nur wenn keine wichtigen Edges vorhanden)
+                        degree = graph.graph.degree(node_id)
+                        if degree == 0:  # Nur isolierte Notes löschen
+                            graph.graph.remove_node(node_id)
+                            deleted_count += 1
+                            log_event("NOTE_DELETED_TEMPORAL", {
+                                "node_id": node_id,
+                                "age_days": age_days
+                            })
+            except Exception as e:
+                log_debug(f"Error checking age for {node_id}: {e}")
+                continue
+    
+    if archived_count > 0 or deleted_count > 0:
+        log_event("TEMPORAL_CLEANUP_COMPLETED", {
+            "checked": len(notes),
+            "archived": archived_count,
+            "deleted": deleted_count,
+            "old_notes_count": len(old_notes)
+        })
+    
+    return {
+        "notes_checked": len(notes),
+        "notes_archived": archived_count,
+        "notes_deleted": deleted_count,
+        "old_notes": old_notes[:10]  # Max 10 für Response
+    }
+
+
+def calculate_graph_health_score(
+    notes: Dict[str, AtomicNote],
+    graph: GraphStore
+) -> Dict[str, Any]:
+    """
+    Berechnet einen Gesamt-Health-Score für den Graph (0.0 - 1.0).
+    
+    Bewertet:
+    - Durchschnittlicher Quality-Score aller Notes
+    - Graph-Connectivity (Anteil isolierter Nodes)
+    - Edge-Qualität (Anteil Edges mit Reasoning)
+    - Note-Vollständigkeit (Anteil Notes mit allen Feldern)
+    
+    Args:
+        notes: Dict von note_id -> AtomicNote
+        graph: GraphStore Instanz
+    
+    Returns:
+        Dict mit:
+        - "health_score": Gesamt-Score (0.0 - 1.0)
+        - "health_level": "excellent" | "good" | "fair" | "poor" | "very_poor"
+        - "average_quality_score": Durchschnittlicher Quality-Score
+        - "connectivity_score": Connectivity-Score (0.0 - 1.0)
+        - "edge_quality_score": Edge-Quality-Score (0.0 - 1.0)
+        - "completeness_score": Completeness-Score (0.0 - 1.0)
+        - "isolated_nodes_ratio": Anteil isolierter Nodes (0.0 - 1.0)
+        - "edges_with_reasoning_ratio": Anteil Edges mit Reasoning (0.0 - 1.0)
+    """
+    if len(notes) == 0:
+        return {
+            "health_score": 0.0,
+            "health_level": "very_poor",
+            "average_quality_score": 0.0,
+            "connectivity_score": 0.0,
+            "edge_quality_score": 0.0,
+            "completeness_score": 0.0,
+            "isolated_nodes_ratio": 1.0,
+            "edges_with_reasoning_ratio": 0.0
+        }
+    
+    # 1. Durchschnittlicher Quality-Score
+    quality_scores = []
+    for node_id, note in notes.items():
+        if node_id not in graph.graph.nodes:
+            continue
+        
+        metadata = note.metadata or {}
+        quality_score = metadata.get("quality_score")
+        if quality_score is not None:
+            quality_scores.append(quality_score)
+    
+    average_quality = sum(quality_scores) / len(quality_scores) if quality_scores else 0.0
+    
+    # 2. Connectivity-Score (Anteil nicht-isolierter Nodes)
+    total_nodes = len(notes)
+    isolated_count = 0
+    for node_id in notes.keys():
+        if node_id in graph.graph.nodes:
+            degree = graph.graph.degree(node_id)
+            if degree == 0:
+                isolated_count += 1
+    
+    isolated_ratio = isolated_count / total_nodes if total_nodes > 0 else 1.0
+    connectivity_score = 1.0 - isolated_ratio
+    
+    # 3. Edge-Quality-Score (Anteil Edges mit Reasoning)
+    total_edges = len(list(graph.graph.edges()))
+    edges_with_reasoning = 0
+    
+    for source, target, data in graph.graph.edges(data=True):
+        if data:
+            reasoning = data.get("reasoning") or data.get("reasoning_text")
+            if reasoning and reasoning.strip() and reasoning.lower() != "no reasoning provided":
+                edges_with_reasoning += 1
+    
+    edges_with_reasoning_ratio = edges_with_reasoning / total_edges if total_edges > 0 else 0.0
+    edge_quality_score = edges_with_reasoning_ratio
+    
+    # 4. Completeness-Score (Anteil Notes mit allen Feldern)
+    complete_notes = 0
+    for node_id, note in notes.items():
+        has_content = note.content and len(note.content.strip()) > 0
+        has_summary = note.contextual_summary and len(note.contextual_summary.strip()) > 0
+        has_keywords = note.keywords and len(note.keywords) >= 2
+        has_tags = note.tags and len(note.tags) >= 1
+        has_type = note.type and note.type in ["rule", "procedure", "concept", "tool", "reference", "integration"]
+        
+        if has_content and has_summary and has_keywords and has_tags and has_type:
+            complete_notes += 1
+    
+    completeness_score = complete_notes / total_nodes if total_nodes > 0 else 0.0
+    
+    # Gesamt-Health-Score (gewichteter Durchschnitt)
+    health_score = (
+        average_quality * 0.40 +  # 40% Quality
+        connectivity_score * 0.25 +  # 25% Connectivity
+        edge_quality_score * 0.20 +  # 20% Edge Quality
+        completeness_score * 0.15  # 15% Completeness
+    )
+    
+    # Health-Level bestimmen
+    if health_score >= 0.9:
+        health_level = "excellent"
+    elif health_score >= 0.75:
+        health_level = "good"
+    elif health_score >= 0.6:
+        health_level = "fair"
+    elif health_score >= 0.4:
+        health_level = "poor"
+    else:
+        health_level = "very_poor"
+    
+    return {
+        "health_score": round(health_score, 3),
+        "health_level": health_level,
+        "average_quality_score": round(average_quality, 3),
+        "connectivity_score": round(connectivity_score, 3),
+        "edge_quality_score": round(edge_quality_score, 3),
+        "completeness_score": round(completeness_score, 3),
+        "isolated_nodes_ratio": round(isolated_ratio, 3),
+        "edges_with_reasoning_ratio": round(edges_with_reasoning_ratio, 3)
+    }
+
+
+def find_dead_end_nodes(
+    notes: Dict[str, AtomicNote],
+    graph: GraphStore
+) -> Dict[str, Any]:
+    """
+    Findet Dead-End Nodes (Nodes nur mit eingehenden, aber keine ausgehenden Edges).
+    
+    Prüft die tatsächlichen Relations im Graph, nicht nur Graph-Metriken.
+    
+    Args:
+        notes: Dict von note_id -> AtomicNote
+        graph: GraphStore Instanz
+    
+    Returns:
+        Dict mit:
+        - "dead_end_nodes": Liste von Node-IDs mit Dead-Ends
+        - "dead_end_count": Anzahl Dead-End Nodes
+        - "dead_end_details": Liste mit Details (id, in_degree, out_degree, summary)
+    """
+    if len(notes) == 0:
+        return {
+            "dead_end_nodes": [],
+            "dead_end_count": 0,
+            "dead_end_details": []
+        }
+    
+    dead_end_nodes = []
+    dead_end_details = []
+    
+    # Sammle alle Edges für manuelle Prüfung
+    incoming_edges = {}  # target -> [sources]
+    outgoing_edges = {}  # source -> [targets]
+    
+    for source, target, data in graph.graph.edges(data=True):
+        # Incoming edges
+        if target not in incoming_edges:
+            incoming_edges[target] = []
+        incoming_edges[target].append(source)
+        
+        # Outgoing edges
+        if source not in outgoing_edges:
+            outgoing_edges[source] = []
+        outgoing_edges[source].append(target)
+    
+    for node_id in notes.keys():
+        if node_id not in graph.graph.nodes:
+            continue
+        
+        # Zähle tatsächliche Relations
+        incoming_count = len(incoming_edges.get(node_id, []))
+        outgoing_count = len(outgoing_edges.get(node_id, []))
+        total_degree = incoming_count + outgoing_count
+        
+        # Skip isolierte Nodes (werden bereits von find_isolated_nodes behandelt)
+        if total_degree == 0:
+            continue
+        
+        # Dead-End Detection:
+        # Ein Dead-End ist ein Node, der:
+        # - incoming_count > 0 (andere Nodes haben Edges ZU diesem Node)
+        # - outgoing_count == 0 (dieser Node hat KEINE ausgehenden Edges)
+        # Das bedeutet: Wissen fließt ZU diesem Node, aber nicht weiter
+        is_dead_end = incoming_count > 0 and outgoing_count == 0
+        
+        if is_dead_end:
+            dead_end_nodes.append(node_id)
+            note = notes.get(node_id)
+            dead_end_details.append({
+                "id": node_id,
+                "in_degree": incoming_count,
+                "out_degree": outgoing_count,
+                "total_degree": total_degree,
+                "summary": note.contextual_summary[:100] if note and note.contextual_summary else "N/A"
+            })
+    
+    if dead_end_nodes:
+        log_event("DEAD_END_NODES_FOUND", {
+            "count": len(dead_end_nodes),
+            "node_ids": dead_end_nodes[:10]  # Nur erste 10 loggen
+        })
+    
+    return {
+        "dead_end_nodes": dead_end_nodes,
+        "dead_end_count": len(dead_end_nodes),
+        "dead_end_details": dead_end_details[:10]  # Max 10 für Response
+    }
+
+
 def _validate_enzyme_parameters(
     prune_config: Optional[Dict[str, Any]] = None,
     suggest_config: Optional[Dict[str, Any]] = None,
@@ -2532,7 +3068,16 @@ def run_memory_enzymes(
         "edges_removed": 0,  # Anzahl entfernte Edges (schwach/ohne Reasoning)
         "reasonings_added": 0,  # Anzahl ergänzte Reasoning-Felder
         "types_standardized": 0,  # Anzahl standardisierte Relation Types
-        "validation_warnings": []  # Liste von Warnungen über korrigierte Parameter
+        "validation_warnings": [],  # Liste von Warnungen über korrigierte Parameter
+        # Neue Funktionen
+        "types_validated": 0,  # Anzahl validierte Note-Types
+        "types_corrected": 0,  # Anzahl korrigierte Note-Types
+        "notes_archived": 0,  # Anzahl archivierte Notes (temporal cleanup)
+        "notes_deleted": 0,  # Anzahl gelöschte Notes (temporal cleanup)
+        "graph_health_score": 0.0,  # Graph Health Score (0.0 - 1.0)
+        "graph_health_level": "unknown",  # Graph Health Level
+        "dead_end_nodes_found": 0,  # Anzahl Dead-End Nodes
+        "dead_end_nodes": []  # Liste von Dead-End Nodes mit Details
     }
     
     # Validate and normalize parameters FIRST
@@ -2638,6 +3183,27 @@ def run_memory_enzymes(
         results["keywords_normalized"] = keywords_results["keywords_normalized"]
         results["keywords_removed"] = keywords_results["keywords_removed"]
         results["keywords_corrected"] = keywords_results["keywords_corrected"]
+    
+    # 1.7.5. Validate Note Types (vor validate_notes, damit Types korrekt sind)
+    # Sammle Notes für Type-Validierung
+    notes_for_type_validation = {}
+    for node_id in graph.graph.nodes():
+        node_data = graph.graph.nodes[node_id]
+        try:
+            note = AtomicNote(**node_data)
+            notes_for_type_validation[node_id] = note
+        except Exception:
+            continue
+    
+    if notes_for_type_validation:
+        type_validation_results = validate_note_types(
+            notes_for_type_validation,
+            graph,
+            llm_service,
+            ignore_flags=ignore_flags
+        )
+        results["types_validated"] = type_validation_results["types_validated"]
+        results["types_corrected"] = type_validation_results["types_corrected"]
     
     # 1.8. Validate Notes (prüft Vollständigkeit und korrigiert)
     # Sammle alle Notes für Validierung
@@ -2858,6 +3424,68 @@ def run_memory_enzymes(
                 summary = digest_node(node_id, child_notes, llm_service)
                 if summary:
                     results["digested_count"] += 1
+    
+    # 4. Temporal Note Cleanup (prüft alte Notes)
+    # Sammle alle Notes erneut für Temporal-Cleanup
+    notes_for_temporal = {}
+    for node_id in graph.graph.nodes():
+        node_data = graph.graph.nodes[node_id]
+        try:
+            note = AtomicNote(**node_data)
+            notes_for_temporal[node_id] = note
+        except Exception:
+            continue
+    
+    if notes_for_temporal:
+        temporal_results = temporal_note_cleanup(
+            notes_for_temporal,
+            graph,
+            max_age_days=365,  # 1 Jahr
+            archive_instead_of_delete=True
+        )
+        results["notes_archived"] = temporal_results["notes_archived"]
+        results["notes_deleted"] = temporal_results["notes_deleted"]
+    
+    # 5. Calculate Graph Health Score
+    # Sammle alle Notes erneut für Health-Score
+    notes_for_health = {}
+    for node_id in graph.graph.nodes():
+        node_data = graph.graph.nodes[node_id]
+        try:
+            note = AtomicNote(**node_data)
+            notes_for_health[node_id] = note
+        except Exception:
+            continue
+    
+    if notes_for_health:
+        health_results = calculate_graph_health_score(notes_for_health, graph)
+        results["graph_health_score"] = health_results["health_score"]
+        results["graph_health_level"] = health_results["health_level"]
+        # Füge detaillierte Health-Metriken hinzu
+        results["graph_health_details"] = {
+            "average_quality_score": health_results["average_quality_score"],
+            "connectivity_score": health_results["connectivity_score"],
+            "edge_quality_score": health_results["edge_quality_score"],
+            "completeness_score": health_results["completeness_score"],
+            "isolated_nodes_ratio": health_results["isolated_nodes_ratio"],
+            "edges_with_reasoning_ratio": health_results["edges_with_reasoning_ratio"]
+        }
+    
+    # 6. Find Dead-End Nodes
+    # Sammle alle Notes erneut für Dead-End-Detection
+    notes_for_dead_end = {}
+    for node_id in graph.graph.nodes():
+        node_data = graph.graph.nodes[node_id]
+        try:
+            note = AtomicNote(**node_data)
+            notes_for_dead_end[node_id] = note
+        except Exception:
+            continue
+    
+    if notes_for_dead_end:
+        dead_end_results = find_dead_end_nodes(notes_for_dead_end, graph)
+        results["dead_end_nodes_found"] = dead_end_results["dead_end_count"]
+        results["dead_end_nodes"] = dead_end_results["dead_end_details"]
     
     return results
 
