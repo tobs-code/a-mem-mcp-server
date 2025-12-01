@@ -26,6 +26,7 @@ An agentic memory system for LLM agents based on the Zettelkasten principle.
 - ✅ **Memory Enzymes**: Autonomous background processes for graph maintenance
   - **Link Pruner**: Removes old/weak edges automatically
   - **Relation Suggester**: Finds new semantic connections between notes
+  - **Dead-End Node Auto-Linker**: Automatically creates out-connections for dead-end nodes with intelligent filtering
   - **Summary Digester**: Compresses overcrowded nodes with many children
 - ✅ **Automatic Scheduler**: Runs memory enzymes every hour in the background
 - ✅ **Metadata Field**: Experimental fields support without schema changes
@@ -110,6 +111,7 @@ All critical operations are logged to `data/events.jsonl`:
 - `NOTES_DELETED`: When old notes are deleted (temporal cleanup)
 - `GRAPH_HEALTH_CALCULATED`: When graph health score is calculated
 - `DEAD_END_NODES_FOUND`: When dead-end nodes are detected
+- `DEAD_END_NODES_AUTO_LINKED`: When dead-end nodes are automatically linked with out-connections
 - `LOW_QUALITY_NOTES_REMOVED`: When low-quality notes are removed
 - `CORRUPTED_NODES_REPAIRED`: When corrupted nodes are repaired
 - `RELATIONS_SUGGESTED`: When new connections are found
@@ -131,16 +133,20 @@ Autonomous background processes that maintain graph health:
 - **Temporal Note Cleanup**: Archives or deletes notes older than specified age (default: 365 days)
 - **Graph Health Score Calculator**: Calculates overall graph health score (0.0-1.0) based on average note quality, connectivity, edge quality, and completeness
 - **Dead-End Node Detector**: Identifies nodes with incoming but no outgoing edges (dead ends in knowledge flow)
+- **Dead-End Node Auto-Linker**: Automatically creates out-connections for dead-end nodes using intelligent filtering:
+  - **Combined Strategy**: Ignores generic tags (reference, documentation, tool, etc.), prioritizes keywords, requires similarity check
+  - **Smart Thresholds**: 0.46 for strong signals (keywords or meaningful tags), 0.60 for weak signals (generic tags only), 0.58 for no signals
+  - **Quality Control**: Prevents low-quality connections by requiring meaningful semantic signals
 - **Low Quality Note Remover**: Removes irrelevant notes (CAPTCHA pages, error pages, spam)
 - **Summary Refiner**: Refines similar summaries to make them more specific and distinct
 - **Corrupted Node Repairer**: Repairs corrupted nodes (missing fields, invalid data)
-- **Relation Suggester**: Finds semantically similar notes (cosine similarity ≥ 0.75)
+- **Relation Suggester**: Finds semantically similar notes (cosine similarity ≥ 0.75) with dead-end node prioritization
 - **Summary Digester**: Compresses nodes with >8 children into compact summaries
 
 ### Automatic Scheduler
 The system automatically runs memory enzymes every hour:
 - Runs in background without blocking MCP operations
-- Executes 18+ maintenance operations in optimized sequence
+- Executes 19+ maintenance operations in optimized sequence
 - Logs all maintenance activities with detailed metrics
 - Gracefully handles errors and continues running
 - **Comprehensive Results**: Returns detailed statistics for all operations (pruned links, merged duplicates, validated notes, quality scores, graph health score, dead-end nodes, etc.)
@@ -357,7 +363,7 @@ python mcp_server.py
 13. **`get_graph`** - Returns the full graph snapshot (nodes + edges) for visualization
 
 #### Memory Maintenance
-14. **`run_memory_enzymes`** - Runs comprehensive memory maintenance: prunes old/weak links and zombie nodes, merges duplicates, validates and fixes edges, removes self-loops, links isolated nodes, normalizes keywords, calculates quality scores, validates notes and types, performs temporal cleanup, calculates graph health score, detects dead-end nodes, removes low-quality content, refines summaries, repairs corrupted nodes, suggests new relations, and digests overcrowded nodes. Automatically optimizes graph structure with 18+ maintenance operations
+14. **`run_memory_enzymes`** - Runs comprehensive memory maintenance: prunes old/weak links and zombie nodes, merges duplicates, validates and fixes edges, removes self-loops, links isolated nodes, normalizes keywords, calculates quality scores, validates notes and types, performs temporal cleanup, calculates graph health score, detects dead-end nodes, automatically creates out-connections for dead-end nodes (with intelligent filtering), removes low-quality content, refines summaries, repairs corrupted nodes, suggests new relations, and digests overcrowded nodes. Automatically optimizes graph structure with 19+ maintenance operations
 
 #### Research & Web Integration
 15. **`research_and_store`** - Performs deep web research on a query and stores findings as atomic notes. Uses Google Search API (if configured) or DuckDuckGo HTTP search, extracts content with Jina Reader (local Docker or cloud), and processes PDFs with Unstructured. Automatically creates notes with metadata, keywords, and tags.
