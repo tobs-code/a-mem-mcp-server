@@ -80,7 +80,7 @@ class Config:
     
     # Google Search API Settings (for web search)
     GOOGLE_SEARCH_ENABLED = os.getenv("GOOGLE_SEARCH_ENABLED", "true").lower() == "true"
-    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "AIzaSyDiZaKRMGrho3LT3eftvR9r9S3LLgh5X4w")
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "YOUR_KEY")
     GOOGLE_SEARCH_ENGINE_ID = os.getenv("GOOGLE_SEARCH_ENGINE_ID", "c7bf0393f031a4691")
     
     # Cache file for amem_stats --diff
