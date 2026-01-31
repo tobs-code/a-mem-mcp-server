@@ -47,15 +47,15 @@ def compute_priority(
     
     type_weight = type_weights.get(note.type, 1.0)
     
-    # Age factor (older = less weight, but never below 0.3)
+    # Age factor (older = less weight, but never below 0.5)
     age_days = (datetime.now() - note.created_at).days + 1
-    age_factor = max(0.3, 1.0 - age_days * 0.01)
+    age_factor = max(0.5, 1.0 - age_days * 0.005)  # Slower decay
     
     # Usage factor (more usage = higher priority)
     usage_factor = 1 + (usage_count * 0.2)
     
     # Edge factor (more connections = higher priority)
-    edge_factor = 1 + (edge_count * 0.05)
+    edge_factor = 1 + (edge_count * 0.1)  # Increased from 0.05 to 0.1
     
     # Final calculation: Multiply age_factor (not divide) so older = lower priority
     priority = type_weight * usage_factor * edge_factor * age_factor

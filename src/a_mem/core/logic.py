@@ -215,17 +215,25 @@ class MemoryController:
 
     async def retrieve(self, query: str) -> List[SearchResult]:
         loop = asyncio.get_running_loop()
-        
-        # Embedding calculation
+
+        # Embedding calculation - use same format as storage (query only, no additional text)
+        # Note: Storage uses: f"{note.content} {note.contextual_summary} {' '.join(note.keywords)} {' '.join(note.tags)}"
+        # But for queries we only have the query string, so we use it directly
         q_embedding = await loop.run_in_executor(None, self.llm.get_embedding, query)
         
-        # Vector Query
-        ids, scores = await loop.run_in_executor(None, self.storage.vector.query, q_embedding, 5)
-        
+        # Vector Query - Get more results to filter out irrelevant ones
+        ids, scores = await loop.run_in_executor(None, self.storage.vector.query, q_embedding, 20)
+
+        # ChromaDB returns distances (higher = less similar)
+        # Convert to similarities using cosine-like normalization: similarity = 1 / (1 + distance)
+        # This gives more realistic similarity scores for the observed distance ranges
+        similarities = [1 / (1 + score) for score in scores]
+
         results = []
-        for n_id, similarity_score in zip(ids, scores):
+        for n_id, similarity_score, raw_distance in zip(ids, similarities, scores):
             note = self.storage.get_note(n_id)
-            if not note: continue
+            if not note:
+                continue
             
             # Get edge count (graph degree) for priority calculation
             graph = self.storage.graph.graph
@@ -242,9 +250,15 @@ class MemoryController:
             priority = compute_priority(note, usage_count=0, edge_count=edge_count)
             
             # Combined score: similarity * priority (both normalized)
-            # Similarity is already 0-1, priority is typically 0.3-2.0, so we normalize it
+            # Similarity is now 0-1 (converted from distance), priority is typically 0.3-2.0, so we normalize it
             normalized_priority = min(priority / 2.0, 1.0)  # Cap at 1.0
-            combined_score = similarity_score * (0.7 + 0.3 * normalized_priority)
+            combined_score = similarity_score * (0.7 + 0.3 * normalized_priority)  # Increased priority weight (30%) for relevance
+
+            # Filter out irrelevant results (combined_score < 0.55)
+            # Moderate threshold: balances precision vs recall
+            # Note: Allows more relevant results while filtering obvious mismatches
+            if combined_score < 0.55:
+                continue
             
             # Graph Traversal (In-Memory, fast enough for Main Thread)
             neighbors_data = self.storage.graph.get_neighbors(n_id)
@@ -273,6 +287,7 @@ class MemoryController:
         # Sort by combined score (highest first)
         results.sort(key=lambda x: x.score, reverse=True)
         
+
         # Researcher Agent Integration (Hybrid Approach)
         # Trigger researcher if confidence is low and researcher is enabled
         if settings.RESEARCHER_ENABLED and len(results) > 0:
@@ -281,7 +296,7 @@ class MemoryController:
                 # Trigger researcher asynchronously (non-blocking)
                 # Research happens in background, results are stored automatically
                 asyncio.create_task(self._trigger_researcher(query, top_score))
-        
+
         return results
     
     async def _trigger_researcher(self, query: str, confidence_score: float):

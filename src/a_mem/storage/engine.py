@@ -236,7 +236,11 @@ class GraphStore:
 class VectorStore:
     def __init__(self):
         self.client = chromadb.PersistentClient(path=str(settings.CHROMA_DIR))
-        self.collection = self.client.get_or_create_collection(name="memories")
+        # Create collection with explicit cosine similarity metric for better semantic search
+        self.collection = self.client.get_or_create_collection(
+            name="memories",
+            metadata={"hnsw:space": "cosine"}  # Explicit cosine similarity
+        )
         # Erwartete Embedding-Dimension basierend auf Provider
         self._expected_dimension = self._get_expected_dimension()
         self._validate_dimension()
@@ -403,7 +407,6 @@ def create_graph_store():
                 rustworkx_store = RustworkXGraphStore()
                 # Wrap with SafeGraphStore for edge case handling
                 if SAFE_WRAPPER_AVAILABLE and SafeGraphStore is not None:
-                    _write_log("[GraphStore] Wrapping with SafeGraphStore for edge case protection")
                     return SafeGraphStore(rustworkx_store)
                 else:
                     return rustworkx_store
