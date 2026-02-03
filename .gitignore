@@ -1,47 +1,47 @@
-# Python
-__pycache__/
-*.py[cod]
-*.class
-*.so
-.Python
-env/
-venv/
-ENV/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+```
+# Dependencies
+node_modules/
 
-# Environment Variables
+# Build outputs
+dist/
+build/
+coverage/
+
+# Environment variables
 .env
 .env.local
-.env.*.local
+.env.*
 
-# IDE
+# IDE files
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
 
-# A-MEM specific
-data/
+# Logs
 *.log
-.amem_stats_cache.json
-graph_save.log
 
-# Test files and results
-tests/test_results_*.json
-tests/*_results.json
-*.test.json
+# Temporary files
+*.tmp
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# TypeScript/JavaScript build
+*.tsbuildinfo
+dist/
+out/
+
+# Vite specific
+!.vite/
+.vite/cache
+.vite/deps
+
+# Coverage reports
+coverage/
+.nyc_output/
+istanbul/
+```
